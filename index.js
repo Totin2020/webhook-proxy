@@ -3,9 +3,43 @@ const https = require('https');
 
 const PORT = process.env.PORT || 3080;
 const PRODUCTION_URL = process.env.PRODUCTION_URL || 'https://inventory.ticketits.com/api/webhooks/stubhub';
+const DEV_SECRET = process.env.DEV_SECRET || 'ticketits-dev-2025';
 
-// En memoria (Render free tier no tiene volúmenes persistentes)
-let devEndpoints = [];
+// Cola de webhooks para desarrollo (máximo 100, expiran en 5 minutos)
+let webhookQueue = [];
+const MAX_QUEUE_SIZE = 100;
+const WEBHOOK_TTL = 5 * 60 * 1000; // 5 minutos
+
+// Limpiar webhooks expirados
+function cleanExpiredWebhooks() {
+  const now = Date.now();
+  webhookQueue = webhookQueue.filter(w => (now - w.timestamp) < WEBHOOK_TTL);
+}
+
+// Agregar webhook a la cola
+function queueWebhook(headers, body, topic, deliveryId) {
+  cleanExpiredWebhooks();
+  
+  if (webhookQueue.length >= MAX_QUEUE_SIZE) {
+    webhookQueue.shift(); // Eliminar el más viejo
+  }
+  
+  webhookQueue.push({
+    id: deliveryId,
+    topic,
+    headers,
+    body,
+    timestamp: Date.now()
+  });
+}
+
+// Obtener webhooks pendientes y limpiar cola
+function getAndClearWebhooks() {
+  cleanExpiredWebhooks();
+  const webhooks = [...webhookQueue];
+  webhookQueue = [];
+  return webhooks;
+}
 
 function forwardWebhook(targetUrl, headers, body, label) {
   return new Promise((resolve) => {
@@ -64,47 +98,46 @@ const server = http.createServer(async (req, res) => {
 
   // Health check
   if (req.url === '/health' || req.url === '/') {
+    cleanExpiredWebhooks();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ 
       status: 'ok', 
       service: 'webhook-proxy',
       production: PRODUCTION_URL,
-      devEndpoints: devEndpoints.length,
+      queueSize: webhookQueue.length,
       timestamp: new Date().toISOString() 
     }));
     return;
   }
   
-  // Registrar/eliminar dev endpoints
-  if (req.url === '/dev/register' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
-      try {
-        const { url, action } = JSON.parse(body);
-        
-        if (action === 'add' && !devEndpoints.includes(url)) {
-          devEndpoints.push(url);
-          console.log(`📝 [DEV] Endpoint registrado: ${url}`);
-        } else if (action === 'remove') {
-          devEndpoints = devEndpoints.filter(e => e !== url);
-          console.log(`🗑️ [DEV] Endpoint eliminado: ${url}`);
-        }
-        
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, endpoints: devEndpoints }));
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
-      }
-    });
+  // POLLING: Obtener webhooks pendientes (para desarrollo local)
+  if (req.url === '/dev/poll' && req.method === 'GET') {
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.replace('Bearer ', '');
+    
+    if (token !== DEV_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    
+    const webhooks = getAndClearWebhooks();
+    console.log(`📥 [POLL] Devolviendo ${webhooks.length} webhook(s) pendientes`);
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ webhooks }));
     return;
   }
   
-  // Listar dev endpoints
-  if (req.url === '/dev/list' && req.method === 'GET') {
+  // Ver estado de la cola (sin autenticación, solo info)
+  if (req.url === '/dev/status' && req.method === 'GET') {
+    cleanExpiredWebhooks();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ endpoints: devEndpoints }));
+    res.end(JSON.stringify({ 
+      queueSize: webhookQueue.length,
+      maxSize: MAX_QUEUE_SIZE,
+      ttlMinutes: WEBHOOK_TTL / 60000
+    }));
     return;
   }
   
@@ -138,13 +171,9 @@ const server = http.createServer(async (req, res) => {
       console.log('  📤 Forwarding to production...');
       await forwardWebhook(PRODUCTION_URL, forwardHeaders, body, 'PROD');
       
-      // Reenviar a endpoints de desarrollo
-      if (devEndpoints.length > 0) {
-        console.log(`  📤 Forwarding to ${devEndpoints.length} dev endpoint(s)...`);
-        for (const devUrl of devEndpoints) {
-          await forwardWebhook(devUrl, forwardHeaders, body, 'DEV');
-        }
-      }
+      // Guardar en cola para polling de desarrollo
+      queueWebhook(forwardHeaders, body, topic, deliveryId);
+      console.log(`  📦 Queued for dev polling (${webhookQueue.length} in queue)`);
       
       console.log('  ✅ Done\n');
     });
