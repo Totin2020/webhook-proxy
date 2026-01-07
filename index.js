@@ -154,6 +154,7 @@ const server = http.createServer(async (req, res) => {
       console.log(`  - DeliveryId: ${deliveryId}`);
       console.log(`  - Size: ${body.length} bytes`);
       console.log(`  - Time: ${new Date().toISOString()}`);
+      console.log(`  - Headers received:`, JSON.stringify(req.headers, null, 2));
       
       // Responder inmediatamente a StubHub (debe ser < 10 segundos)
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -169,6 +170,7 @@ const server = http.createServer(async (req, res) => {
       
       // Reenviar a producción
       console.log('  📤 Forwarding to production...');
+      console.log(`  - Headers to forward:`, JSON.stringify(forwardHeaders, null, 2));
       await forwardWebhook(PRODUCTION_URL, forwardHeaders, body, 'PROD');
       
       // Guardar en cola para polling de desarrollo
