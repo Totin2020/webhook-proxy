@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: webhook-proxy
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      - key: PRODUCTION_URL
+        value: https://inventory.ticketits.com/api/webhooks/stubhub
+      - key: NODE_ENV
+        value: production
